@@ -1,10 +1,9 @@
 import { OpenAPIObject, OperationObject, PathItemObject, ReferenceObject, SchemaObject } from '@loopback/openapi-v3-types';
-import fs from 'fs-extra';
+import { vol } from 'memfs';
 import $RefParser, { HTTPResolverOptions } from '@apidevtools/json-schema-ref-parser';
-import mkdirp from 'mkdirp';
 import path from 'path';
 import { parseOptions } from './cmd-args';
-import { HTTP_METHODS, methodName, simpleName, syncDirs, deleteDirRecursive } from './gen-utils';
+import { HTTP_METHODS, methodName, simpleName, syncFileSystemDirectories } from './gen-utils';
 import { Globals } from './globals';
 import { HandlebarsManager } from './handlebars-manager';
 import { Import } from './imports';
@@ -25,18 +24,16 @@ export class NgOpenApiGen {
   services = new Map<string, Service>();
   operations = new Map<string, Operation>();
   outDir: string;
-  tempDir: string;
 
   constructor(
     public openApi: OpenAPIObject,
     public options: Options) {
 
-    this.outDir = this.options.output || 'src/app/api';
+    this.outDir = path.join(process.cwd(), (this.options.output || 'src/app/api'));
     // Make sure the output path doesn't end with a slash
     if (this.outDir.endsWith('/') || this.outDir.endsWith('\\')) {
       this.outDir = this.outDir.substr(0, this.outDir.length - 1);
     }
-    this.tempDir = this.outDir + '$';
 
     this.initHandlebars();
     this.readTemplates();
@@ -53,66 +50,61 @@ export class NgOpenApiGen {
    * Actually generates the files
    */
   generate(): void {
-    // Make sure the temporary directory is empty before starting
-    deleteDirRecursive(this.tempDir);
-    fs.mkdirsSync(this.tempDir);
+    // Make sure the output directory is created in the in-memory filesystem before starting
+    vol.mkdirSync(this.outDir, { recursive: true });
 
-    try {
-      // Generate each model
-      const models = [...this.models.values()];
-      for (const model of models) {
-        this.write('model', model, model.fileName, 'models');
-      }
-
-      // Generate each service
-      const services = [...this.services.values()];
-      for (const service of services) {
-        this.write('service', service, service.fileName, 'services');
-      }
-
-      // Context object passed to general templates
-      const general = {
-        services: services,
-        models: models
-      };
-
-      // Generate the general files
-      this.write('configuration', general, this.globals.configurationFile);
-      this.write('response', general, this.globals.responseFile);
-      this.write('requestBuilder', general, this.globals.requestBuilderFile);
-      this.write('baseService', general, this.globals.baseServiceFile);
-      if (this.globals.moduleClass && this.globals.moduleFile) {
-        this.write('module', general, this.globals.moduleFile);
-      }
-
-      const modelImports = this.globals.modelIndexFile || this.options.indexFile
-        ? models.map(m => new Import(m.name, './models', m.options)) : null;
-      if (this.globals.modelIndexFile) {
-        this.write('modelIndex', { ...general, modelImports }, this.globals.modelIndexFile);
-      }
-      if (this.globals.serviceIndexFile) {
-        this.write('serviceIndex', general, this.globals.serviceIndexFile);
-      }
-      if (this.options.indexFile) {
-        this.write('index', { ...general, modelImports }, 'index');
-      }
-
-      // Now synchronize the temp to the output folder
-      syncDirs(this.tempDir, this.outDir, this.options.removeStaleFiles !== false);
-
-      console.info(`Generation from ${this.options.input} finished with ${models.length} models and ${services.length} services.`);
-    } finally {
-      // Always remove the temporary directory
-      deleteDirRecursive(this.tempDir);
+    // Generate each model
+    const models = [...this.models.values()];
+    for (const model of models) {
+      this.write('model', model, model.fileName, 'models');
     }
+
+    // Generate each service
+    const services = [...this.services.values()];
+    for (const service of services) {
+      this.write('service', service, service.fileName, 'services');
+    }
+
+    // Context object passed to general templates
+    const general = {
+      services: services,
+      models: models
+    };
+
+    // Generate the general files
+    this.write('configuration', general, this.globals.configurationFile);
+    this.write('response', general, this.globals.responseFile);
+    this.write('requestBuilder', general, this.globals.requestBuilderFile);
+    this.write('baseService', general, this.globals.baseServiceFile);
+    if (this.globals.moduleClass && this.globals.moduleFile) {
+      this.write('module', general, this.globals.moduleFile);
+    }
+    const modelImports = this.globals.modelIndexFile || this.options.indexFile
+      ? models.map(m => new Import(m.name, './models', m.options)) : null;
+    if (this.globals.modelIndexFile) {
+      this.write('modelIndex', { ...general, modelImports }, this.globals.modelIndexFile);
+    }
+    if (this.globals.serviceIndexFile) {
+      this.write('serviceIndex', general, this.globals.serviceIndexFile);
+    }
+    if (this.options.indexFile) {
+      this.write('index', { ...general, modelImports }, 'index');
+    }
+
+    // Now synchronize the output directory from the in-memory filesystem to the real one
+    syncFileSystemDirectories(this.outDir, this.options.removeStaleFiles !== false);
+
+    console.info(`Generation from ${this.options.input} finished with ${models.length} models and ${services.length} services.`);
   }
 
   private write(template: string, model: any, baseName: string, subDir?: string) {
     const ts = this.templates.apply(template, model);
-    const file = path.join(this.tempDir, subDir || '.', `${baseName}.ts`);
+    const file = path.join(this.outDir, subDir || '.', `${baseName}.ts`);
     const dir = path.dirname(file);
-    mkdirp.sync(dir);
-    fs.writeFileSync(file, ts, { encoding: 'utf-8' });
+    if (!vol.existsSync(dir)) {
+      vol.mkdirSync(dir, { recursive: true });
+    }
+    vol.writeFileSync(file, ts, { encoding: 'utf-8' });
   }
 
   private initHandlebars() {

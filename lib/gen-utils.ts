@@ -1,6 +1,7 @@
 import jsesc from 'jsesc';
-import fs from 'fs-extra';
 import path from 'path';
+import * as fs from 'fs';
+import { vol } from 'memfs';
 import { camelCase, deburr, kebabCase, upperCase, upperFirst } from 'lodash';
 import { OpenAPIObject, ReferenceObject, SchemaObject } from 'openapi3-ts';
 import { Options } from './options';
@@ -285,52 +286,42 @@ export function resolveRef(openApi: OpenAPIObject, ref: string): any {
 }
 
 /**
- * Recursively deletes a directory
+ * Synchronizes the files in a directory from the in-memory filesystem to the actual filesystem
  */
-export function deleteDirRecursive(dir: string) {
-  if (fs.existsSync(dir)) {
-    fs.readdirSync(dir).forEach((file: any) => {
-      const curPath = path.join(dir, file);
-      if (fs.lstatSync(curPath).isDirectory()) { // recurse
-        deleteDirRecursive(curPath);
-      } else { // delete file
-        fs.unlinkSync(curPath);
-      }
-    });
-    fs.rmdirSync(dir);
-  }
-}
+ export function syncFileSystemDirectories(srcDir: string, removeStale: boolean): any {
+  const inMemoryFS = vol;
+  const actualFS = fs;
 
-/**
- * Synchronizes the files from the source to the target directory. Optionally remove stale files.
- */
-export function syncDirs(srcDir: string, destDir: string, removeStale: boolean): any {
-  fs.ensureDirSync(destDir);
-  const srcFiles = fs.readdirSync(srcDir);
-  const destFiles = fs.readdirSync(destDir);
-  for (const file of srcFiles) {
-    const srcFile = path.join(srcDir, file);
-    const destFile = path.join(destDir, file);
-    if (fs.lstatSync(srcFile).isDirectory()) {
-      // A directory: recursively sync
-      syncDirs(srcFile, destFile, removeStale);
-    } else {
-      // Read the content of both files and update if they differ
-      const srcContent = fs.readFileSync(srcFile, { encoding: 'utf-8' });
-      const destContent = fs.existsSync(destFile) ? fs.readFileSync(destFile, { encoding: 'utf-8' }) : null;
-      if (srcContent !== destContent) {
-        fs.writeFileSync(destFile, srcContent, { encoding: 'utf-8' });
-        console.debug('Wrote ' + destFile);
+  if (inMemoryFS.existsSync(srcDir)) {
+    if (!actualFS.existsSync(srcDir)) {
+      actualFS.mkdirSync(srcDir, { recursive: true });
+    }
+
+    const srcFiles = inMemoryFS.readdirSync(srcDir);
+    const destFiles = actualFS.readdirSync(srcDir);
+    for (const file of srcFiles) {
+      const srcFile = path.join(srcDir, file.toString());
+
+      if (inMemoryFS.lstatSync(srcFile).isDirectory()) {
+        // A directory: recursively sync
+        syncFileSystemDirectories(srcFile, removeStale);
+      } else {
+        // Read the content of both files and update if they differ
+        const srcContent = inMemoryFS.readFileSync(srcFile, { encoding: 'utf-8' });
+        const destContent = actualFS.existsSync(srcFile) ? actualFS.readFileSync(srcFile, { encoding: 'utf-8' }) : null;
+        if (srcContent !== destContent) {
+          actualFS.writeFileSync(srcFile, srcContent, { encoding: 'utf-8' });
+          console.debug('Wrote ' + srcFile);
+        }
       }
     }
-  }
-  if (removeStale) {
-    for (const file of destFiles) {
-      const srcFile = path.join(srcDir, file);
-      const destFile = path.join(destDir, file);
-      if (!fs.existsSync(srcFile) && fs.lstatSync(destFile).isFile()) {
-        fs.unlinkSync(destFile);
-        console.debug('Removed stale file ' + destFile);
+    if (removeStale) {
+      for (const file of destFiles) {
+        const srcFile = path.join(srcDir, file.toString());
+        if (!inMemoryFS.existsSync(srcFile) && actualFS.lstatSync(srcFile).isFile()) {
+          actualFS.unlinkSync(srcFile);
+          console.debug('Removed stale file ' + srcFile);
+        }
       }
     }
   }
